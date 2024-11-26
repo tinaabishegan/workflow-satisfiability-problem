@@ -24,6 +24,7 @@ class Instance:
         self.BOD = [] # the list of pairs of steps that must be assigned to the same user
         self.at_most_k = [] # the list of pairs of k and steps
         self.one_team = [] # the list of pairs of steps and teams
+        self.user_capacity = [] # list of pairs of user and capacity
 
 
 
@@ -91,6 +92,13 @@ def parse_file(filename):
                     teams.append(team)
                 instance.one_team.append((steps, teams))
                 continue
+            # 6th Constraint: User-capacity
+            m = re.match(r'User-capacity u(\d+) (\d+)', l)
+            if m:
+                user_id = int(m.group(1)) - 1
+                capacity = int(m.group(2))
+                instance.user_capacity.append((user_id, capacity))
+                continue
             else:
                 raise Exception(f'Failed to parse this line: {l}')
     return instance
@@ -117,6 +125,7 @@ def Solver(filename, **kwargs):
     print(f'\tBinding-of-duty: {instance.BOD}')
     print(f'\tAt-most-k: {instance.at_most_k}')
     print(f'\tOne-team: {instance.one_team}')
+    print(f'\tUser-capacity: {instance.user_capacity}')
     print("=====================================================")
 
     ''' Start of Solver '''
@@ -167,6 +176,12 @@ def Solver(filename, **kwargs):
             for user in range(instance.number_of_users):
                 if user not in users_in_teams:
                     model.Add(user_assignment[step][user] == 0)
+
+    # User-Capacity constraints
+    for (user, capacity) in instance.user_capacity:
+        assigned_steps = [user_assignment[step][user] for step in range(instance.number_of_steps)]
+        model.Add(sum(assigned_steps) <= capacity)
+        print(f"Applied User-Capacity constraint: user u{user + 1} can perform at most {capacity} steps")
 
     ''' End of Solver '''
     starttime = float(currenttime() * 1000)

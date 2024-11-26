@@ -1,6 +1,7 @@
 import re
 from collections import defaultdict
 import os
+import sys
 
 # Parsing functions
 def parse_problem_instance(filepath):
@@ -10,11 +11,12 @@ def parse_problem_instance(filepath):
     binding_of_duty = []
     at_most_k = []
     one_team = []
+    user_capacity = {}
 
     with open(filepath, 'r') as file:
         lines = file.readlines()
 
-    for line in lines:
+    for line in lines[3:]:  # Skip header lines
         line = line.strip()
         if not line or line.startswith('#'):
             continue  # Skip empty lines and comments
@@ -36,10 +38,16 @@ def parse_problem_instance(filepath):
             steps = parts[2:]
             at_most_k.append((k, steps))
         elif line.startswith('One-team'):
-            # Handle One-team constraints (if present)
-            # You can extend this parsing logic as needed
-            pass
-    return authorizations, separation_of_duty, binding_of_duty, at_most_k, one_team
+            steps = [int(s) for s in re.findall(r's(\d+)', line)]
+            teams_raw = re.findall(r'\(([^)]+)\)', line)
+            teams = [[int(u[1:]) for u in team.split()] for team in teams_raw]
+            one_team.append((steps, teams))
+        elif line.startswith('User-capacity'):
+            parts = line.split()
+            user = parts[1]
+            capacity = int(parts[2])
+            user_capacity[user] = capacity
+    return authorizations, separation_of_duty, binding_of_duty, at_most_k, one_team, user_capacity
 
 def parse_solution(filepath):
     """Parse solution from a text file."""
@@ -91,22 +99,36 @@ def validate_at_most_k(solution, at_most_k):
             print(f"At-most-{k} violation: More than {k} users assigned to steps {steps}. Users assigned: {assigned_users}")
 
 def validate_one_team(solution, one_team):
+    """
+    Validate that the steps are assigned to a valid team of users.
+    """
     for steps, teams in one_team:
         assigned_users = [solution.get(step) for step in steps if solution.get(step)]
-        for team in teams:
-            if all(user in team for user in assigned_users):
-                break
-        else:
-            print(f"One-team violation in steps {steps}. Users assigned: {assigned_users}")
+        valid_team = any(all(user in team for user in assigned_users) for team in teams)
+        if not valid_team:
+            print(f"One-team violation: Steps {steps} assigned users {assigned_users} do not match any valid team {teams}.")
+
+
+def validate_user_capacity(solution, user_capacity):
+    user_step_counts = {}
+    for step, user in solution.items():
+        user_step_counts[user] = user_step_counts.get(user, 0) + 1
+    for user, capacity in user_capacity.items():
+        assigned_steps = user_step_counts.get(user, 0)
+        if assigned_steps > capacity:
+            print(f"User-capacity violation: User {user} assigned to {assigned_steps} steps, exceeds capacity {capacity}.")
 
 # Main execution
 def main():
-    base_path = os.path.dirname(__file__)
-    problem_instance_file = os.path.join(base_path, 'instances', 'example7.txt')  # Path to your problem instance file
-    solution_file = os.path.join(base_path, '0-solution.txt')  # Path to your solution file
+    if len(sys.argv) != 3:
+        print("Usage: python validator3.py <problem_instance_file> <solution_file>")
+        return
+
+    problem_instance_file = sys.argv[1]
+    solution_file = sys.argv[2]
 
     # Parse input files
-    authorizations, separation_of_duty, binding_of_duty, at_most_k, one_team = parse_problem_instance(problem_instance_file)
+    authorizations, separation_of_duty, binding_of_duty, at_most_k, one_team, user_capacity = parse_problem_instance(problem_instance_file)
     solution = parse_solution(solution_file)
 
     # Run validations
@@ -115,6 +137,8 @@ def main():
     validate_binding_of_duty(solution, binding_of_duty)
     validate_at_most_k(solution, at_most_k)
     validate_one_team(solution, one_team)
+    validate_user_capacity(solution, user_capacity)
 
 if __name__ == "__main__":
     main()
+# python validator3.py C:\Users\Tinaabishegan\Documents\symbolicai\cw2\all/5-constraint/2.txt 0-solution.txt

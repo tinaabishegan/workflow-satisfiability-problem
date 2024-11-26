@@ -14,24 +14,23 @@ def parse_file(filename):
     constraints_count = int(lines[2].split(': ')[1])
     
     constraints = []
-    precedence_constraints = []
+    user_capacity_constraints = []
     for line in lines[3:]:
         line = line.strip()
-        if line.startswith("Precedence"):
+        if line.startswith("User-capacity"):
             parts = line.split()
-            s1 = parts[1]
-            s2 = parts[2]
-            precedence_constraints.append((s1, s2))
+            user = int(parts[1][1:])
+            capacity = int(parts[2])
+            user_capacity_constraints.append((user, capacity))
         else:
             constraints.append(line)
 
-    print(f"Total constraints parsed: {len(constraints) + len(precedence_constraints)}")
-    return steps_count, users_count, constraints, precedence_constraints
+    return steps_count, users_count, constraints, user_capacity_constraints
 
 
 def Solver(filename, progress_callback=None, **kwargs):
     model = cp_model.CpModel()
-    steps_count, users_count, constraints, precedence_constraints = parse_file(filename)
+    steps_count, users_count, constraints, user_capacity_constraints = parse_file(filename)
     
     # Create variables: one for each step indicating assigned user (1 to users_count)
     assignments = [model.NewIntVar(1, users_count, f'step_{i + 1}') for i in range(steps_count)]
@@ -141,14 +140,17 @@ def Solver(filename, progress_callback=None, **kwargs):
     for user in range(1, users_count + 1):
         if user not in user_authorisations:
             print(f"User u{user} has no specific authorisations; allowed on any step.")
-    
-    # Add Precedence constraints
-    for s1, s2 in precedence_constraints:
-        # Enforce that the user assigned to s1 has a lower index than the user assigned to s2
-        s1_index = int(s1[1:]) - 1
-        s2_index = int(s2[1:]) - 1
-        model.Add(assignments[s1_index] < assignments[s2_index])
-        print(f"Applied Precedence constraint: step {s1} must precede step {s2}")
+
+    # Add User-Capacity constraints
+    for user, capacity in user_capacity_constraints:
+        assigned_steps = []
+        for step in range(steps_count):
+            is_assigned = model.NewBoolVar(f'user_{user}_assigned_to_step_{step+1}')
+            model.Add(assignments[step] == user).OnlyEnforceIf(is_assigned)
+            model.Add(assignments[step] != user).OnlyEnforceIf(is_assigned.Not())
+            assigned_steps.append(is_assigned)
+        model.Add(sum(assigned_steps) <= capacity)
+        print(f"Applied User-Capacity constraint: user u{user} can perform at most {capacity} steps")
 
     # Solve the model with additional settings for detailed logging
     solver = cp_model.CpSolver()
@@ -193,10 +195,7 @@ def Solver(filename, progress_callback=None, **kwargs):
         d['sat'] = 'sat'
         solution = [f"s{i+1}: u{solver.Value(assignments[i])}" for i in range(steps_count)]
         d['sol'] = solution
-        
-        # Check for multiple solutions (optional)
-        # solver.SearchForAllSolutions(model, cp_model.VarArraySolutionPrinter(assignments))
-    
+
     print("Solver status:", solver.StatusName(status))
     return d
 
@@ -205,8 +204,7 @@ if __name__ == '__main__':
     from helper import transform_output
     # Use a relative path based on the current script location
     base_path = os.path.dirname(__file__)
-    dpath = os.path.join(base_path, 'instances/4-constraint-hard', '15.txt')  # Path to test file
-    # dpath = os.path.join(base_path, 'instances', '4-constraint-hard', '0.txt')  # Path to test file
+    dpath = os.path.join(base_path, 'instances', 'example7.txt')  # Path to test file
     print(f"Resolved dpath: {dpath}")
     d = Solver(dpath, silent=False)
     s = transform_output(d)

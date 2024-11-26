@@ -1,5 +1,6 @@
 import re
 import os
+import sys
 from typing import Dict, List, Set, Tuple
 
 class WSPValidator:
@@ -12,6 +13,7 @@ class WSPValidator:
         self.binding_duties: List[Tuple[int, int]] = []
         self.at_most_k: List[Tuple[int, List[int]]] = []  # (k, steps)
         self.one_team: List[Tuple[List[int], List[List[int]]]] = []  # (steps, teams)
+        self.user_capacity_constraints: Dict[int, int] = {}  # user -> capacity
         
     def parse_problem(self, problem_file: str) -> None:
         """Parse the problem instance file."""
@@ -52,17 +54,16 @@ class WSPValidator:
                 self.at_most_k.append((k, steps))
                 
             elif parts[0] == "One-team":
-                steps = []
-                teams = []
-                # Extract steps
-                for part in parts[1:]:
-                    if part.startswith('s'):
-                        steps.append(int(part[1:]))
-                    elif part.startswith('('):
-                        # Extract team
-                        users = [int(u[1:]) for u in re.findall(r'u\d+', part)]
-                        teams.append(users)
+                # Parse steps and teams
+                steps = [int(s) for s in re.findall(r's(\d+)', line)]
+                teams_raw = re.findall(r'\(([^)]+)\)', line)
+                teams = [[int(u[1:]) for u in team.split()] for team in teams_raw]
                 self.one_team.append((steps, teams))
+
+            elif parts[0] == "User-capacity":
+                user = int(parts[1][1:])
+                capacity = int(parts[2])
+                self.user_capacity_constraints[user] = capacity
     
     def parse_solution(self, solution_file: str) -> Dict[int, int]:
         """Parse the solution file and return step -> user assignments."""
@@ -95,41 +96,54 @@ class WSPValidator:
         
         # Check separation of duty
         for s1, s2 in self.separation_duties:
-            if assignments[s1] == assignments[s2]:
+            if assignments.get(s1) == assignments.get(s2):
                 errors.append(f"Separation of duty violated for steps s{s1} and s{s2}")
         
         # Check binding of duty
         for s1, s2 in self.binding_duties:
-            if assignments[s1] != assignments[s2]:
+            if assignments.get(s1) != assignments.get(s2):
                 errors.append(f"Binding of duty violated for steps s{s1} and s{s2}")
         
         # Check at-most-k
         for k, steps in self.at_most_k:
-            users = set(assignments[s] for s in steps)
+            users = set(assignments.get(s) for s in steps if assignments.get(s) is not None)
             if len(users) > k:
                 errors.append(f"At-most-{k} constraint violated for steps {steps}")
         
-        # Check one-team
+        # Validate One-Team
+        # One-team validation
         for steps, teams in self.one_team:
-            assigned_users = set(assignments[s] for s in steps)
-            valid_team = False
-            for team in teams:
-                if assigned_users.issubset(set(team)):
-                    valid_team = True
-                    break
-            if not valid_team:
-                errors.append(f"One-team constraint violated for steps {steps}")
+            assigned_users = [assignments[s] for s in steps if s in assignments]
+
+            # Check if all assigned users form a valid team
+            if not any(all(user in team for user in assigned_users) for team in teams):
+                errors.append(f"One-team violated: Steps {steps} assigned users {assigned_users} do not match any valid team {teams}.")
+
+
+        # --- Added validation for user capacity ---
+        # Check user capacity
+        user_step_counts = {}
+        for step, user in assignments.items():
+            user_step_counts[user] = user_step_counts.get(user, 0) + 1
+
+        for user, capacity in self.user_capacity_constraints.items():
+            assigned_steps = user_step_counts.get(user, 0)
+            if assigned_steps > capacity:
+                errors.append(f"User capacity violated: User u{user} assigned to {assigned_steps} steps, exceeds capacity {capacity}.")
         
         return len(errors) == 0, errors
 
 def main():
     validator = WSPValidator()
     
-    # Parse problem and solution
-    base_path = os.path.dirname(__file__)
-    problem_file = os.path.join(base_path, 'instances', 'example7.txt')  # Path to test file
-    solution_file = os.path.join(base_path, '0-solution.txt')  # Path to test file
+    # --- Adjusted to accept command-line arguments ---
+    if len(sys.argv) != 3:
+        print("Usage: python validator2.py <problem_file> <solution_file>")
+        return
+    problem_file = sys.argv[1]
+    solution_file = sys.argv[2]
     
+    # Parse problem and solution
     validator.parse_problem(problem_file)
     assignments = validator.parse_solution(solution_file)
     
@@ -145,3 +159,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+# python validator2.py C:\Users\Tinaabishegan\Documents\symbolicai\cw2\all/5-constraint/2.txt 0-solution.txt

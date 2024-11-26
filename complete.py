@@ -1,13 +1,13 @@
 import os
 import re
 import itertools
-from time import time as currenttime
 from threading import Thread
-from ortools.sat.python import cp_model
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from tkinter import StringVar, IntVar, BooleanVar
 from tkinter.ttk import Treeview, Progressbar
+import time
+import subprocess
 
 def parse_file(filename):
     with open(filename, 'r') as file:
@@ -19,19 +19,18 @@ def parse_file(filename):
     constraints_count = int(lines[2].split(': ')[1])
     
     constraints = []
-    precedence_constraints = []
+    user_capacity_constraints = {}
     for line in lines[3:]:
         line = line.strip()
-        if line.startswith("Precedence"):
+        if line.startswith("User-capacity"):
             parts = line.split()
-            s1 = parts[1]
-            s2 = parts[2]
-            precedence_constraints.append((s1, s2))
+            user_id = parts[1]
+            capacity = int(parts[2])
+            user_capacity_constraints[user_id] = capacity
         else:
             constraints.append(line)
 
-    print(f"Total constraints parsed: {len(constraints) + len(precedence_constraints)}")
-    return steps_count, users_count, constraints, precedence_constraints
+    return steps_count, users_count, constraints, user_capacity_constraints
 
 # GUI Application Class
 class WorkflowSolverApp(tk.Tk):
@@ -43,13 +42,14 @@ class WorkflowSolverApp(tk.Tk):
         self.steps = []
         self.users = []
         self.constraints = []
-        self.precedence_constraints = []
+        self.user_capacity_constraints = {}
         self.user_authorisations = {}
         self.one_team_constraints = []
         self.at_most_k_constraints = []
         self.binding_of_duty_constraints = []
         self.separation_of_duty_constraints = []
         self.conflicts = []
+        self.timeout = 240  # 4 minutes timeout
 
     def create_widgets(self):
         # Create notebook (tabs)
@@ -329,34 +329,38 @@ class WorkflowSolverApp(tk.Tk):
             else:
                 messagebox.showerror("Error", "Please select at least one user.")
 
-    class PrecedenceConstraintDialog(tk.Toplevel):
-        def __init__(self, parent, steps):
+    class UserCapacityConstraintDialog(tk.Toplevel):
+        def __init__(self, parent, users):
             super().__init__(parent)
-            self.title("Add Precedence Constraint")
-            self.steps = steps
+            self.title("Add User Capacity Constraint")
+            self.users = users
             self.result = None
 
-            ttk.Label(self, text="Select Preceding Step:").pack(pady=5)
-            self.step1_var = StringVar()
-            self.step1_combo = ttk.Combobox(self, textvariable=self.step1_var, values=self.steps, state='readonly')
-            self.step1_combo.pack(pady=5)
+            # Select User
+            ttk.Label(self, text="Select User:").pack(pady=5)
+            self.user_var = StringVar()
+            self.user_combo = ttk.Combobox(self, textvariable=self.user_var, values=self.users, state='readonly')
+            self.user_combo.pack(pady=5)
 
-            ttk.Label(self, text="Select Subsequent Step:").pack(pady=5)
-            self.step2_var = StringVar()
-            self.step2_combo = ttk.Combobox(self, textvariable=self.step2_var, values=self.steps, state='readonly')
-            self.step2_combo.pack(pady=5)
+            # Enter Capacity
+            ttk.Label(self, text="Enter User Capacity (Max Steps):").pack(pady=5)
+            self.capacity_var = IntVar()
+            self.capacity_entry = ttk.Entry(self, textvariable=self.capacity_var)
+            self.capacity_entry.pack(pady=5)
 
+            # Add Constraint Button
             add_button = ttk.Button(self, text="Add Constraint", command=self.add_constraint)
             add_button.pack(pady=10)
 
         def add_constraint(self):
-            step1 = self.step1_var.get()
-            step2 = self.step2_var.get()
-            if step1 and step2 and step1 != step2:
-                self.result = (step1, step2)
+            selected_user = self.user_var.get()
+            capacity = self.capacity_var.get()
+
+            if selected_user and capacity > 0:
+                self.result = (selected_user, capacity)
                 self.destroy()
             else:
-                messagebox.showerror("Error", "Please select two different steps.")
+                messagebox.showerror("Error", "Please select a user and enter a valid capacity.")
 
     def add_step(self):
         step_label = f"s{len(self.steps) + 1}"
@@ -372,9 +376,6 @@ class WorkflowSolverApp(tk.Tk):
             self.steps_listbox.delete(tk.END)
             # Remove associated constraints
             self.constraints = [c for c in self.constraints if step_label not in c]
-            self.precedence_constraints = [
-                pc for pc in self.precedence_constraints if pc[0] != step_label and pc[1] != step_label
-            ]
             self.update_constraints_tree()
         else:
             messagebox.showerror("Error", "No steps to remove.")
@@ -425,9 +426,9 @@ class WorkflowSolverApp(tk.Tk):
         oneteam_button = ttk.Button(constraint_builder_frame, text="Add One-Team Constraint", command=self.add_oneteam_constraint)
         oneteam_button.grid(row=0, column=4, padx=5, pady=5)
 
-        # Precedence Constraint Builder
-        precedence_button = ttk.Button(constraint_builder_frame, text="Add Precedence Constraint", command=self.add_precedence_constraint)
-        precedence_button.grid(row=0, column=5, padx=5, pady=5)
+        # User-Capacity Constraint Builder (Changed from Precedence)
+        user_capacity_button = ttk.Button(constraint_builder_frame, text="Add User Capacity Constraint", command=self.add_user_capacity_constraint)
+        user_capacity_button.grid(row=0, column=5, padx=5, pady=5)
 
         # Add "Remove Constraint" button
         remove_constraint_button = ttk.Button(constraint_builder_frame, text="Remove Constraint", command=self.remove_constraint)
@@ -449,7 +450,10 @@ class WorkflowSolverApp(tk.Tk):
             values = self.constraints_tree.item(item, 'values')
             self.constraints_tree.delete(item)
             constraint = values[1]
-            self.constraints.remove(constraint)
+            if constraint.startswith("User-capacity"):
+                self.user_capacity_constraints.remove(constraint)
+            else:
+                self.constraints.remove(constraint)
 
         self.update_constraints_tree()
 
@@ -524,21 +528,18 @@ class WorkflowSolverApp(tk.Tk):
             self.constraints.append(constraint)
             self.constraints_tree.insert('', tk.END, values=("One-Team", constraint))
 
-    def add_precedence_constraint(self):
-        if len(self.steps) < 2:
-            messagebox.showerror("Error", "At least two steps are required.")
+    def add_user_capacity_constraint(self):
+        if not self.users:
+            messagebox.showerror("Error", "At least one user is required.")
             return
 
-        dialog = WorkflowSolverApp.PrecedenceConstraintDialog(self, self.steps)
+        dialog = WorkflowSolverApp.UserCapacityConstraintDialog(self, self.users)
         self.wait_window(dialog)
         if dialog.result:
-            step1, step2 = dialog.result
-            step1_index = self.steps.index(step1) + 1
-            step2_index = self.steps.index(step2) + 1
-            constraint = f"Precedence s{step1_index} s{step2_index}"
+            user, capacity = dialog.result
+            constraint = f"User-capacity {user} {capacity}"
             self.constraints.append(constraint)
-            self.precedence_constraints.append((f's{step1_index}', f's{step2_index}'))
-            self.constraints_tree.insert('', tk.END, values=("Precedence", constraint))
+            self.constraints_tree.insert('', tk.END, values=("User-Capacity", constraint))
 
     def update_constraints_tree(self):
         # Clear the tree
@@ -557,19 +558,24 @@ class WorkflowSolverApp(tk.Tk):
                 constraint_type = "At-Most-k"
             elif constraint.startswith("One-team"):
                 constraint_type = "One-Team"
-            elif constraint.startswith("Precedence"):
-                constraint_type = "Precedence"
+            elif constraint.startswith("User-capacity"):
+                constraint_type = "User-Capacity"
             else:
                 constraint_type = "Unknown"
             self.constraints_tree.insert('', tk.END, values=(constraint_type, constraint))
 
-    # ------------- Results Tab Enhancements -------------
+     # ------------- Results Tab Enhancements -------------
     def build_results_tab(self):
         frame = self.results_frame
 
         # Solve button
         solve_button = ttk.Button(frame, text="Solve Problem", command=self.solve_problem)
         solve_button.pack(pady=10)
+
+        # --- Added Validate Solution Checkbox ---
+        self.validate_var = BooleanVar()
+        validate_checkbox = ttk.Checkbutton(frame, text="Validate solution", variable=self.validate_var)
+        validate_checkbox.pack(pady=5)
 
         # Progress bar
         self.progress_var = IntVar()
@@ -586,9 +592,12 @@ class WorkflowSolverApp(tk.Tk):
         self.result_tree.heading("Assigned User", text="Assigned User")
         self.result_tree.pack(fill='both', expand=True, padx=5, pady=5)
 
+        # --- Create notebook for validation results ---
+        self.validation_notebook = ttk.Notebook(frame)
+        self.validation_notebook.pack(fill='both', expand=True, padx=5, pady=5)
+
     # ------------- Solver Execution in a Separate Thread -------------
     def solve_problem(self):
-        # Disable solve button during execution
         # Run solver in a separate thread
         self.progress_var.set(0)
         self.update_idletasks()
@@ -607,38 +616,88 @@ class WorkflowSolverApp(tk.Tk):
         with open(temp_filename, 'w') as file:
             file.write(f"#Steps: {len(self.steps)}\n")
             file.write(f"#Users: {len(self.users)}\n")
-            file.write(f"#Constraints: {len(self.constraints) + len(self.precedence_constraints)}\n")
+            file.write(f"#Constraints: {len(self.constraints)}\n")
             for constraint in self.constraints:
                 file.write(constraint + '\n')
-            for s1, s2 in self.precedence_constraints:
-                file.write(f"Precedence {s1} {s2}\n")
 
         def solver_callback():
+            start_time = time.time()
             d = solver_module.Solver(temp_filename)
-
+            end_time = time.time()
+            d['exe_time'] = end_time - start_time
             # Update results
-            self.after(0, lambda: self.display_results(d))
-            os.remove(temp_filename)
+            self.after(0, lambda: self.display_results(d, temp_filename))
+            # os.remove(temp_filename)  # Remove after validation
 
-        thread = Thread(target=solver_callback)
-        thread.start()
+        solver_thread = Thread(target=solver_callback)
+        solver_thread.start()
 
-    def display_results(self, d):
+    def display_results(self, d, temp_filename):
         self.result_tree.delete(*self.result_tree.get_children())
         if d['sat'] == 'sat':
             self.solutions = [d['sol']]
             self.show_solution(d['sol'])
-            self.info_label['text'] = f"1 solution found. Solve time: {d['exe_time']}."
+            self.info_label['text'] = f"1 solution found. Solve time: {d['exe_time']:.2f} seconds."
+
+            if self.validate_var.get():
+                self.run_validators(temp_filename, 'temp_solution.txt')
+            else:
+                os.remove(temp_filename)
+                os.remove('temp_solution.txt')
 
         else:
             self.info_label['text'] = "No solutions found."
             messagebox.showerror("No Solution", "No solution found.")
+            os.remove(temp_filename)
 
     def show_solution(self, solution):
         self.result_tree.delete(*self.result_tree.get_children())
-        for line in solution:
-            step, user = line.split(': ')
-            self.result_tree.insert('', tk.END, values=(step, user))
+        with open('temp_solution.txt', 'w') as f:
+            for line in solution:
+                step, user = line.split(': ')
+                self.result_tree.insert('', tk.END, values=(step, user))
+                f.write(f"{step}: {user}\n")
+
+    def run_validators(self, problem_file, solution_file):
+        # Clear previous validation tabs
+        for tab_id in self.validation_notebook.tabs():
+            self.validation_notebook.forget(tab_id)
+
+        # Run validator.py
+        validation_result = self.run_validator_script('validator.py', problem_file, solution_file)
+        self.add_validation_tab('Validator 1', validation_result)
+
+        # Run validator2.py
+        validation_result = self.run_validator_script('validator2.py', problem_file, solution_file)
+        self.add_validation_tab('Validator 2', validation_result)
+
+        # Run validator3.py
+        validation_result = self.run_validator_script('validator3.py', problem_file, solution_file)
+        self.add_validation_tab('Validator 3', validation_result)
+
+        os.remove(problem_file)
+        os.remove(solution_file)
+
+    def run_validator_script(self, script_name, problem_file, solution_file):
+        try:
+            result = subprocess.run(['python', script_name, problem_file, solution_file],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            output = result.stdout
+            errors = result.stderr
+            if result.returncode == 0:
+                return output + errors
+            else:
+                return f"Validator encountered errors:\n{errors}"
+        except Exception as e:
+            return f"Failed to run {script_name}: {e}"
+
+    def add_validation_tab(self, validator_name, validation_result):
+        tab = ttk.Frame(self.validation_notebook)
+        self.validation_notebook.add(tab, text=validator_name)
+        text_widget = tk.Text(tab)
+        text_widget.pack(fill='both', expand=True)
+        text_widget.insert('1.0', validation_result)
+        text_widget.config(state='disabled')
 
     def import_problem(self):
         """Import problem instance from a file."""
@@ -649,13 +708,13 @@ class WorkflowSolverApp(tk.Tk):
         if filename:
             try:
                 # Parse the file
-                steps_count, users_count, constraints, precedence_constraints = parse_file(filename)
+                steps_count, users_count, constraints, user_capacity_constraints = parse_file(filename)
                 
                 # Reset current data
                 self.steps.clear()
                 self.users.clear()
                 self.constraints.clear()
-                self.precedence_constraints.clear()
+                self.user_capacity_constraints.clear()
 
                 # Populate steps and users
                 self.steps = [f"s{i+1}" for i in range(steps_count)]
@@ -663,7 +722,9 @@ class WorkflowSolverApp(tk.Tk):
 
                 # Populate constraints
                 self.constraints = constraints
-                self.precedence_constraints = precedence_constraints
+                for uc in user_capacity_constraints:
+                    constraint = f"User-capacity {uc[0]} {uc[1]}"
+                    self.constraints.append(constraint)
 
                 # Update UI components
                 self.steps_listbox.delete(0, tk.END)
@@ -692,11 +753,9 @@ class WorkflowSolverApp(tk.Tk):
                 with open(filename, 'w') as file:
                     file.write(f"#Steps: {len(self.steps)}\n")
                     file.write(f"#Users: {len(self.users)}\n")
-                    file.write(f"#Constraints: {len(self.constraints) + len(self.precedence_constraints)}\n")
+                    file.write(f"#Constraints: {len(self.constraints)}\n")
                     for constraint in self.constraints:
                         file.write(constraint + '\n')
-                    for s1, s2 in self.precedence_constraints:
-                        file.write(f"Precedence {s1} {s2}\n")
                 messagebox.showinfo("Export Successful", f"Problem exported to {filename}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to export problem: {e}")

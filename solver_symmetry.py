@@ -13,24 +13,23 @@ def parse_file(filename):
     constraints_count = int(lines[2].split(': ')[1])
     
     constraints = []
-    precedence_constraints = []
+    user_capacity_constraints = []
     for line in lines[3:]:
         line = line.strip()
-        if line.startswith("Precedence"):
+        if line.startswith("User-capacity"):
             parts = line.split()
-            s1 = parts[1]
-            s2 = parts[2]
-            precedence_constraints.append((s1, s2))
+            user = int(parts[1][1:])
+            capacity = int(parts[2])
+            user_capacity_constraints.append((user, capacity))
         else:
             constraints.append(line)
 
-    print(f"Total constraints parsed: {len(constraints) + len(precedence_constraints)}")
-    return steps_count, users_count, constraints, precedence_constraints
+    return steps_count, users_count, constraints, user_capacity_constraints
 
 
 def Solver(filename, **kwargs):
     model = cp_model.CpModel()
-    steps_count, users_count, constraints, precedence_constraints = parse_file(filename)
+    steps_count, users_count, constraints, user_capacity_constraints = parse_file(filename)
     
     # Create variables: one for each step indicating assigned user (1 to users_count)
     assignments = [model.NewIntVar(1, users_count, f'step_{i + 1}') for i in range(steps_count)]
@@ -92,11 +91,9 @@ def Solver(filename, **kwargs):
                     model.Add(assignments[step] == user_vars[i]).OnlyEnforceIf(is_assigned)
                 
                 # Each step must be assigned to exactly one user variable
-                model.Add(sum(assignment_vars) == 1)
+                model.AddExactlyOne(assignment_vars)
             
             print(f"Applied At-most-k constraint on steps {[s + 1 for s in step_indices]} with max {k} unique users")
-
-
 
         elif parts[0] == "One-team":            
 
@@ -128,82 +125,90 @@ def Solver(filename, **kwargs):
                 'teams': team_groups,
                 'team_vars': [],  # To store team selection variables
             })
-            # print(f"Applied One-team constraint for steps {group_steps} with team groups {team_groups}")
 
-        # After parsing all constraints, process the One-Team constraints
-        # Mapping from step to list of constraints it belongs to
-        step_constraints = {}
+    # After parsing all constraints, process the One-Team constraints
+    # Mapping from step to list of constraints it belongs to
+    step_constraints = {}
 
-        # For each One-Team constraint, create team selection variables
-        for idx, otc in enumerate(one_team_constraints):
-            teams = otc['teams']
-            steps = otc['steps']
-            team_vars = []
-            for team_idx, team in enumerate(teams):
-                team_var = model.NewBoolVar(f'one_team_{idx}_team_{team_idx}_selected')
-                team_vars.append(team_var)
-            otc['team_vars'] = team_vars
+    # For each One-Team constraint, create team selection variables
+    for idx, otc in enumerate(one_team_constraints):
+        teams = otc['teams']
+        steps = otc['steps']
+        team_vars = []
+        for team_idx, team in enumerate(teams):
+            team_var = model.NewBoolVar(f'one_team_{idx}_team_{team_idx}_selected')
+            team_vars.append(team_var)
+        otc['team_vars'] = team_vars
 
-            # Ensure exactly one team is selected for this constraint
-            model.Add(sum(team_vars) == 1)
+        # Ensure exactly one team is selected for this constraint
+        model.AddExactlyOne(team_vars)
 
-            # For each step, add to step_constraints
+        # For each step, add to step_constraints
+        for step in steps:
+            if step not in step_constraints:
+                step_constraints[step] = []
+            step_constraints[step].append({
+                'constraint_idx': idx,
+                'team_vars': team_vars,
+                'teams': teams,
+            })
+
+        # For each step in the constraint, ensure the assigned user is in the selected team
+        for team_idx, team in enumerate(teams):
+            team_var = team_vars[team_idx]
             for step in steps:
-                if step not in step_constraints:
-                    step_constraints[step] = []
-                step_constraints[step].append({
-                    'constraint_idx': idx,
-                    'team_vars': team_vars,
-                    'teams': teams,
-                })
+                # Ensure that if this team is selected, the assigned user is in this team
+                allowed_users_bools = []
+                for user in team:
+                    user_assigned = model.NewBoolVar(f'step_{step}_user_{user}_team_{idx}_{team_idx}')
+                    model.Add(assignments[step - 1] == user).OnlyEnforceIf(user_assigned)
+                    model.Add(assignments[step - 1] != user).OnlyEnforceIf(user_assigned.Not())
+                    allowed_users_bools.append(user_assigned)
+                # If the team is selected, then one of its users must be assigned to the step
+                model.AddBoolOr(allowed_users_bools).OnlyEnforceIf(team_var)
 
-            # For each step in the constraint, ensure the assigned user is in the selected team
-            for team_idx, team in enumerate(teams):
-                team_var = team_vars[team_idx]
-                for step in steps:
-                    # Ensure that if this team is selected, the assigned user is in this team
-                    allowed_users_bools = []
-                    for user in team:
-                        user_assigned = model.NewBoolVar(f'step_{step}_user_{user}_team_{idx}_{team_idx}')
-                        model.Add(assignments[step - 1] == user).OnlyEnforceIf(user_assigned)
-                        model.Add(assignments[step - 1] != user).OnlyEnforceIf(user_assigned.Not())
-                        allowed_users_bools.append(user_assigned)
-                    # If the team is selected, then one of its users must be assigned to the step
-                    model.AddBoolOr(allowed_users_bools).OnlyEnforceIf(team_var)
+    # Handle overlapping steps between One-Team constraints
+    for step, constraints_list in step_constraints.items():
+        if len(constraints_list) > 1:
+            # Step appears in multiple One-Team constraints
+            # Process pairs of constraints
+            for i in range(len(constraints_list)):
+                for j in range(i + 1, len(constraints_list)):
+                    c1 = constraints_list[i]
+                    c2 = constraints_list[j]
+                    c1_team_vars = c1['team_vars']
+                    c2_team_vars = c2['team_vars']
+                    c1_teams = c1['teams']
+                    c2_teams = c2['teams']
+                    # For all combinations of selected teams, enforce compatibility
+                    for ti1, team1 in enumerate(c1_teams):
+                        for ti2, team2 in enumerate(c2_teams):
+                            selected_i = c1_team_vars[ti1]
+                            selected_j = c2_team_vars[ti2]
+                            overlap = set(team1).intersection(set(team2))
+                            if not overlap:
+                                # If intersection is empty, cannot select both teams
+                                model.Add(selected_i + selected_j <= 1)
 
-        # Handle overlapping steps between One-Team constraints
-        for step, constraints_list in step_constraints.items():
-            if len(constraints_list) > 1:
-                # Step appears in multiple One-Team constraints
-                # Process pairs of constraints
-                for i in range(len(constraints_list)):
-                    for j in range(i + 1, len(constraints_list)):
-                        c1 = constraints_list[i]
-                        c2 = constraints_list[j]
-                        c1_team_vars = c1['team_vars']
-                        c2_team_vars = c2['team_vars']
-                        c1_teams = c1['teams']
-                        c2_teams = c2['teams']
-                        # For all combinations of selected teams, enforce compatibility
-                        for ti1, team1 in enumerate(c1_teams):
-                            for ti2, team2 in enumerate(c2_teams):
-                                selected_i = c1_team_vars[ti1]
-                                selected_j = c2_team_vars[ti2]
-                                overlap = set(team1).intersection(set(team2))
-                                if not overlap:
-                                    # If intersection is empty, cannot select both teams
-                                    model.Add(selected_i + selected_j <= 1)
-
-            print(f"Applied One-team constraint for steps {group_steps} with team groups {team_groups}")
-
-
+        print(f"Applied One-team constraint for steps {group_steps} with team groups {team_groups}")
 
     # Handle users with no specified authorisations: allow any step
     all_steps = set(range(1, steps_count + 1))
     for user in range(1, users_count + 1):
         if user not in user_authorisations:
             print(f"User u{user} has no specific authorisations; allowed on any step.")
-    
+
+    # Add User-Capacity constraints
+    for user, capacity in user_capacity_constraints:
+        assigned_steps = []
+        for step in range(steps_count):
+            is_assigned = model.NewBoolVar(f'user_{user}_assigned_to_step_{step+1}')
+            model.Add(assignments[step] == user).OnlyEnforceIf(is_assigned)
+            model.Add(assignments[step] != user).OnlyEnforceIf(is_assigned.Not())
+            assigned_steps.append(is_assigned)
+        model.Add(sum(assigned_steps) <= capacity)
+        print(f"Applied User-Capacity constraint: user u{user} can perform at most {capacity} steps")
+
     # Solve the model with additional settings for detailed logging
     solver = cp_model.CpSolver()
     # solver.parameters.log_search_progress = True  # Enables logging for troubleshooting
@@ -223,13 +228,7 @@ def Solver(filename, **kwargs):
         d['sat'] = 'sat'
         solution = [f"s{i+1}: u{solver.Value(assignments[i])}" for i in range(steps_count)]
         d['sol'] = solution
-        
-        # # Check for multiple solutions
-        # if status == cp_model.OPTIMAL:
-        #     d['mul_sol'] = "this is the only solution"
-        # else:
-        #     d['mul_sol'] = "other solutions exist"
-    
+
     print("Solver status:", solver.StatusName(status))
     return d
 
@@ -237,8 +236,7 @@ if __name__ == '__main__':
     from helper import transform_output
     # Use a relative path based on the current script location
     base_path = os.path.dirname(__file__)
-    dpath = os.path.join(base_path, 'instances/4-constraint-hard', '0.txt')  # Path to test file
-    # dpath = os.path.join(base_path, 'instances', '4-constraint-hard', '0.txt')  # Path to test file
+    dpath = os.path.join(base_path, 'all/4-constraint-hard', '2.txt')  # Path to test file
     print(f"Resolved dpath: {dpath}")
     d = Solver(dpath, silent=False)
     s = transform_output(d)

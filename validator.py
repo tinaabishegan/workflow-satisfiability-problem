@@ -1,9 +1,10 @@
 import re
 import itertools
+import sys
 
 def parse_file(filename):
     """
-    Parse the input file to extract steps, users, constraints, and precedence constraints.
+    Parse the input file to extract steps, users, constraints, and user capacity constraints.
     """
     with open(filename, 'r') as file:
         lines = file.readlines()
@@ -14,19 +15,19 @@ def parse_file(filename):
     constraints_count = int(lines[2].split(': ')[1])
 
     constraints = []
-    precedence_constraints = []
+    user_capacity_constraints = {}
 
-    # Separate general constraints and precedence constraints
     for line in lines[3:]:
         line = line.strip()
-        if line.startswith("Precedence"):
+        if line.startswith("User-capacity"):
             parts = line.split()
-            s1, s2 = parts[1], parts[2]
-            precedence_constraints.append((s1, s2))
+            user_id = int(parts[1][1:])  # e.g., u1
+            capacity = int(parts[2])
+            user_capacity_constraints[user_id] = capacity
         else:
             constraints.append(line)
 
-    return steps_count, users_count, constraints, precedence_constraints
+    return steps_count, users_count, constraints, user_capacity_constraints
 
 
 def parse_solution_file(solution_file):
@@ -51,7 +52,7 @@ def validate_solution_from_solver(filename, solution_file):
     """
     Validate the solution produced by the solver.
     """
-    steps_count, users_count, constraints, precedence_constraints = parse_file(filename)
+    steps_count, users_count, constraints, user_capacity_constraints = parse_file(filename)
     step_to_user = parse_solution_file(solution_file)
 
     # Validator for each constraint type
@@ -72,8 +73,8 @@ def validate_solution_from_solver(filename, solution_file):
             parts = constraint.split()
             if parts[0] == "Separation-of-duty":
                 step1, step2 = int(parts[1][1:]), int(parts[2][1:])
-                if step_to_user[step1] == step_to_user[step2]:
-                    print(f"Separation-of-duty violated: Steps s{step1} and s{step2} assigned to the same user u{step_to_user[step1]}.")
+                if step_to_user.get(step1) == step_to_user.get(step2):
+                    print(f"Separation-of-duty violated: Steps s{step1} and s{step2} assigned to the same user u{step_to_user.get(step1)}.")
                     return False
         return True
 
@@ -82,8 +83,8 @@ def validate_solution_from_solver(filename, solution_file):
             parts = constraint.split()
             if parts[0] == "Binding-of-duty":
                 step1, step2 = int(parts[1][1:]), int(parts[2][1:])
-                if step_to_user[step1] != step_to_user[step2]:
-                    print(f"Binding-of-duty violated: Steps s{step1} and s{step2} assigned to different users u{step_to_user[step1]} and u{step_to_user[step2]}.")
+                if step_to_user.get(step1) != step_to_user.get(step2):
+                    print(f"Binding-of-duty violated: Steps s{step1} and s{step2} assigned to different users u{step_to_user.get(step1)} and u{step_to_user.get(step2)}.")
                     return False
         return True
 
@@ -93,7 +94,7 @@ def validate_solution_from_solver(filename, solution_file):
             if parts[0] == "At-most-k":
                 k = int(parts[1])
                 step_indices = [int(s[1:]) for s in parts[2:]]
-                users_assigned = {step_to_user[step] for step in step_indices}
+                users_assigned = {step_to_user.get(step) for step in step_indices if step_to_user.get(step)}
                 if len(users_assigned) > k:
                     print(f"At-most-k violated: More than {k} unique users assigned to steps {step_indices} (users: {users_assigned}).")
                     return False
@@ -102,25 +103,33 @@ def validate_solution_from_solver(filename, solution_file):
     def validate_one_team():
         for constraint in constraints:
             if constraint.startswith("One-team"):
-                # Parse steps and teams
-                steps = [int(s) for s in re.findall(r's(\d+)', constraint)]  # Use the matched digits directly
+                parts = constraint.split()
+                # Extract step indices from the constraint
+                steps = [int(s) for s in re.findall(r's(\d+)', constraint)]
+                # Extract team definitions from the constraint
                 teams_raw = re.findall(r'\(([^)]+)\)', constraint)
                 teams = [[int(u[1:]) for u in team.split()] for team in teams_raw]
 
-                # Verify that the user assignments for the steps form a valid team
-                assigned_users = [step_to_user[step] for step in steps]
-                if not any(all(assigned_users[i] in team for i in range(len(steps))) for team in teams):
-                    print(f"One-team violated: Steps {steps} assigned users {assigned_users}, not matching any valid team {teams}.")
+                # Get the assigned users for the steps
+                assigned_users = [step_to_user.get(step) for step in steps if step_to_user.get(step)]
+
+                # Check if assigned users match any valid team
+                if not any(all(user in team for user in assigned_users) for team in teams):
+                    print(f"One-team violated: Steps {steps} assigned users {assigned_users} do not match any valid team {teams}.")
                     return False
         return True
 
 
-    def validate_precedence_constraints():
-        for s1, s2 in precedence_constraints:
-            s1_index = int(s1[1:])
-            s2_index = int(s2[1:])
-            if step_to_user[s1_index] >= step_to_user[s2_index]:
-                print(f"Precedence constraint violated: Step {s1} (u{step_to_user[s1_index]}) must precede step {s2} (u{step_to_user[s2_index]}).")
+    def validate_user_capacity():
+        # Count the number of steps assigned to each user
+        user_step_counts = {}
+        for step, user in step_to_user.items():
+            user_step_counts[user] = user_step_counts.get(user, 0) + 1
+
+        for user, capacity in user_capacity_constraints.items():
+            assigned_steps = user_step_counts.get(user, 0)
+            if assigned_steps > capacity:
+                print(f"User-capacity violated: User u{user} assigned to {assigned_steps} steps, exceeds capacity {capacity}.")
                 return False
         return True
 
@@ -131,21 +140,28 @@ def validate_solution_from_solver(filename, solution_file):
         validate_binding_of_duty,
         validate_at_most_k,
         validate_one_team,
-        validate_precedence_constraints,
+        validate_user_capacity,
     ]
 
+    all_valid = True
     for validator in validators:
         if not validator():
-            print("Solution validation failed.")
-            return False
+            all_valid = False
 
-    print("Solution is valid.")
-    return True
+    if all_valid:
+        print("Solution is valid.")
+        return True
+    else:
+        print("Solution validation failed.")
+        return False
 
 
-
-# Example Usage
+# --- Adjusted main function to accept command-line arguments ---
 if __name__ == "__main__":
-    input_file = 'instances/example7.txt'  # Path to test file
-    solution_file = "0-solution.txt"  # File containing the solution
-    validate_solution_from_solver(input_file, solution_file)
+    if len(sys.argv) != 3:
+        print("Usage: python validator.py <problem_file> <solution_file>")
+    else:
+        input_file = sys.argv[1]
+        solution_file = sys.argv[2]
+        validate_solution_from_solver(input_file, solution_file)
+# python validator.py C:\Users\Tinaabishegan\Documents\symbolicai\cw2\all/5-constraint/2.txt 0-solution.txt
