@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import importlib
 import re
+import pandas as pd  # For Excel file creation
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 class SolverBenchmarkApp(tk.Tk):
@@ -16,10 +17,11 @@ class SolverBenchmarkApp(tk.Tk):
         self.title("Solver Benchmarking Tool")
         self.geometry("900x700")
         self.create_widgets()
-        self.solvers = ['solver_combinatorial', 'solver_symmetry', 'solver_doreen']
+        self.solvers = ['solver_combinatorial']
         self.instance_folders = []
         self.results = {}  # To store the results for plotting
         self.timeout = 240  # Timeout in seconds (4 minutes)
+        self.runs_per_instance = 1  # Number of times each instance is solved
 
     def create_widgets(self):
         # Main frame
@@ -120,7 +122,10 @@ class SolverBenchmarkApp(tk.Tk):
         for folder in self.instance_folders:
             folder_name = os.path.basename(folder)
             self.results[folder_name] = {'instances': {}}
-            instance_files = sorted([f for f in os.listdir(folder) if f.endswith('.txt') and not f.endswith('-solution.txt')], key=lambda x: int(os.path.splitext(x)[0]))
+            instance_files = sorted(
+                [f for f in os.listdir(folder) if f.endswith('.txt') and not f.endswith('-solution.txt')],
+                key=lambda x: int(re.search(r'\d+', os.path.splitext(x)[0]).group())
+            )
 
             for instance_file in instance_files:
                 instance_path = os.path.join(folder, instance_file)
@@ -130,60 +135,45 @@ class SolverBenchmarkApp(tk.Tk):
                 num_constraints, constraint_counts = self.parse_instance_constraints(instance_path)
                 self.results[folder_name]['instances'][instance_name] = {
                     'constraints': constraint_counts,
-                    'times': {},
+                    'times': {solver: [] for solver in self.solvers},
                     'is_sat': None  # Will be updated later
                 }
 
-                # Determine number of runs
-                if '4-constraint-hard' in folder_name or 'instances' in folder_name:
-                    num_runs = 1
-                else:
-                    num_runs = 15
-
-                for solver_name in self.solvers:
-                    # Skip solver_doreen for '4-constraint-hard' folder
-                    if '4-constraint-hard' in folder_name and solver_name == 'solver_doreen':
-                        print(f"Skipping {solver_name} for folder {folder_name} as it takes too long.")
-                        # Do not record time or is_sat for this solver in this folder
-                        continue
-
-                    times = []
-                    is_sat = None
-                    for _ in range(num_runs):
+                # Skip solvers based on folder name
+                solvers_to_run = self.solvers.copy()
+                if '4-constraint-hard' in folder_name:
+                    solvers_to_run = ['solver_symmetry.py']  # Only run this solver
+                if 'instances' in folder_name:
+                    if instance_name == 'example19.txt':
+                        solvers_to_run = []  # Only run this solver
+                    if instance_name == 'example16.txt' or instance_name == 'example17.txt' or instance_name == 'example18.txt':
+                        solvers_to_run = ['solver_combinatorial', 'solver_symmetry.py']
+                for solver_name in solvers_to_run:
+                    for _ in range(self.runs_per_instance):
                         start_time = time.time()
                         try:
                             solver_module = importlib.import_module(solver_name)
-                            # No timeout
                             result = solver_module.Solver(instance_path)
 
-                            if is_sat is None:
-                                is_sat = (result['sat'] == 'sat')
-                            elif is_sat != (result['sat'] == 'sat'):
-                                print(f"Inconsistent sat/unsat results for solver {solver_name} on instance {instance_name}")
-                            if result['sat'] != 'sat':
-                                is_sat = False
-                                break  # No need to time unsat instances
-                            end_time = time.time()
-                            elapsed_time = (end_time - start_time) * 1000  # Convert to milliseconds
-                            times.append(elapsed_time)
+                            is_sat = result['sat'] == 'sat'
+                            elapsed_time = (time.time() - start_time) * 1000  # Convert to milliseconds
+
+                            self.results[folder_name]['instances'][instance_name]['times'][solver_name].append(elapsed_time)
+                            if self.results[folder_name]['instances'][instance_name]['is_sat'] is None:
+                                self.results[folder_name]['instances'][instance_name]['is_sat'] = is_sat
+                            elif self.results[folder_name]['instances'][instance_name]['is_sat'] != is_sat:
+                                print(f"Inconsistent SAT/UNSAT results for solver {solver_name} on instance {instance_name}")
                         except Exception as e:
                             print(f"Error running solver {solver_name} on instance {instance_name}: {e}")
-                            times.append(float('inf'))
-                            is_sat = False
-                            break  # No need to continue timing
-
-                    if is_sat is not None:
-                        mean_time = np.mean(times)
-                        self.results[folder_name]['instances'][instance_name]['times'][solver_name] = mean_time
-                        self.results[folder_name]['instances'][instance_name]['is_sat'] = is_sat
-                    else:
-                        print(f"Instance {instance_name} could not be solved by solver {solver_name}.")
+                            self.results[folder_name]['instances'][instance_name]['times'][solver_name].append(float('inf'))
+                            self.results[folder_name]['instances'][instance_name]['is_sat'] = False
 
                     completed_tasks += 1
                     progress = (completed_tasks / (total_tasks)) * 100
                     self.progress_var.set(progress)
                     self.update_idletasks()
 
+        self.save_results_to_excel()
         messagebox.showinfo("Benchmarking Complete", "Benchmarking has completed successfully.")
         self.folder_listbox.config(state='normal')
 
@@ -205,7 +195,27 @@ class SolverBenchmarkApp(tk.Tk):
 
         return total_constraints, constraint_counts
 
-    # Rest of the methods remain the same
+    def save_results_to_excel(self):
+        """Save results to an Excel file."""
+        output_data = []
+        for folder_name, folder_data in self.results.items():
+            for instance_name, instance_data in folder_data['instances'].items():
+                for solver_name, times in instance_data['times'].items():
+                    for run_idx, time_value in enumerate(times, start=1):
+                        output_data.append({
+                            'Folder': folder_name,
+                            'Instance': instance_name,
+                            'Solver': solver_name,
+                            'Run': run_idx,
+                            'Time (ms)': time_value,
+                            'SAT/UNSAT': instance_data['is_sat']
+                        })
+
+        df = pd.DataFrame(output_data)
+        excel_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
+        if excel_path:
+            df.to_excel(excel_path, index=False)
+            print(f"Results saved to {excel_path}")
 
     def generate_graphs(self):
         if not self.results:

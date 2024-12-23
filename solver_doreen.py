@@ -1,10 +1,11 @@
-from z3 import*
+from z3 import *
 from time import time as currenttime
-from ortools.sat.python import cp_model
 import os
 import re
 import numpy
-# helper function provided in Moodle
+# We see also from the code: from ortools.sat.python import cp_model (but not necessarily used fully).
+from ortools.sat.python import cp_model
+
 def transform_output(d):
     crlf = '\r\n'
     s = []
@@ -13,20 +14,17 @@ def transform_output(d):
     s = crlf + s + crlf+str(d['exe_time']) if 'exe_time' in d else s
     return s
 
-
 class Instance:
     def __init__(self):
         self.number_of_steps = 0
         self.number_of_users = 0
         self.number_of_constraints = 0
-        self.auth = [] # index: the user || element: steps authorised to the user
-        self.SOD = [] # the list of pairs of steps that must be assigned to the different users
-        self.BOD = [] # the list of pairs of steps that must be assigned to the same user
-        self.at_most_k = [] # the list of pairs of k and steps
-        self.one_team = [] # the list of pairs of steps and teams
-        self.user_capacity = [] # list of pairs of user and capacity
-
-
+        self.auth = []
+        self.SOD = []
+        self.BOD = []
+        self.at_most_k = []
+        self.one_team = []
+        self.user_capacity = []
 
 def parse_file(filename):
     def read_attribute(name):
@@ -35,180 +33,216 @@ def parse_file(filename):
         if match:
             return int(match.group(1))
         else:
-            raise Exception(f"Could not parse line {line}; expected the {name} attribute")
-    
+            raise Exception(f"Failed parse line {line}, expected {name}")
+
     instance = Instance()
     with open(filename) as f:
         instance.number_of_steps = read_attribute("#Steps")
         instance.number_of_users = read_attribute("#Users")
         instance.number_of_constraints = read_attribute("#Constraints")
-        # Initialise instance.auth with empty lists as elements
         instance.auth = [[] for _ in range(instance.number_of_users)]
         for _ in range(instance.number_of_constraints):
-            l = f.readline()
-            # 1st Constraint: Authorisations
+            l = f.readline().strip()
+            # parse each constraint
             m = re.match(r"Authorisations u(\d+)(?: s\d+)*", l)
             if m:
-                user_id = int(m.group(1))
-                steps = [-1]  # For users that are not authorised to perform any steps, e.g., Authorisations u1
-                for m in re.finditer(r's(\d+)', l):
-                    if -1 in steps:
-                        steps.remove(-1)  # If user has specified steps, then only store the steps authorised
-                    steps.append(int(m.group(1)) - 1)  # -1 because list index starts from 0
-                instance.auth[user_id - 1].extend(steps)
+                u = int(m.group(1))
+                steps_ = [-1]
+                for mm in re.finditer(r's(\d+)', l):
+                    if -1 in steps_:
+                        steps_.remove(-1)
+                    steps_.append(int(mm.group(1)) - 1)
+                instance.auth[u-1].extend(steps_)
                 continue
-            # 2nd Constraint: Separation-of-duty
             m = re.match(r'Separation-of-duty s(\d+) s(\d+)', l)
             if m:
-                steps = (int(m.group(1)) - 1, int(m.group(2)) - 1)
-                instance.SOD.append(steps)
+                s1 = int(m.group(1)) - 1
+                s2 = int(m.group(2)) - 1
+                instance.SOD.append((s1, s2))
                 continue
-            # 3rd Constraint: Binding-of-duty
             m = re.match(r'Binding-of-duty s(\d+) s(\d+)', l)
             if m:
-                steps = (int(m.group(1)) - 1, int(m.group(2)) - 1)
-                instance.BOD.append(steps)
+                s1 = int(m.group(1)) - 1
+                s2 = int(m.group(2)) - 1
+                instance.BOD.append((s1, s2))
                 continue
-            # 4th Constraint: At-most-k
             m = re.match(r'At-most-k (\d+) (s\d+)(?: (s\d+))*', l)
             if m:
                 k = int(m.group(1))
-                steps = []
-                for m in re.finditer(r's(\d+)', l):
-                    steps.append(int(m.group(1)) - 1)
-                instance.at_most_k.append((k, steps))
+                stp = []
+                for mm in re.finditer(r's(\d+)', l):
+                    stp.append(int(mm.group(1)) - 1)
+                instance.at_most_k.append((k, stp))
                 continue
-            # 5th Constraint: One-team constraint
             m = re.match(r'One-team\s+(s\d+)(?: s\d+)* (\((u\d+)*\))*', l)
             if m:
-                steps = []
-                for m in re.finditer(r's(\d+)', l):
-                    steps.append(int(m.group(1)) - 1)
-                teams = []
-                for m in re.finditer(r'\((u\d+\s*)+\)', l):
-                    team = []
-                    for users in re.finditer(r'u(\d+)', m.group(0)):
-                        team.append(int(users.group(1)) - 1)
-                    teams.append(team)
-                instance.one_team.append((steps, teams))
+                stp = []
+                for mm in re.finditer(r's(\d+)', l):
+                    stp.append(int(mm.group(1)) - 1)
+                tms = []
+                for mm in re.finditer(r'\((u\d+\s*)+\)', l):
+                    t_ = []
+                    for us in re.finditer(r'u(\d+)', mm.group(0)):
+                        t_.append(int(us.group(1)) - 1)
+                    tms.append(t_)
+                instance.one_team.append((stp, tms))
                 continue
-            # 6th Constraint: User-capacity
             m = re.match(r'User-capacity u(\d+) (\d+)', l)
             if m:
-                user_id = int(m.group(1)) - 1
-                capacity = int(m.group(2))
-                instance.user_capacity.append((user_id, capacity))
+                uid = int(m.group(1)) - 1
+                cap = int(m.group(2))
+                instance.user_capacity.append((uid, cap))
                 continue
             else:
-                raise Exception(f'Failed to parse this line: {l}')
+                raise Exception(f"Cannot parse line => {l}")
     return instance
 
 
-def Solver(filename, **kwargs):
+def Solver(filename, max_solutions=1, **kwargs):
+    """
+    :param filename: path to constraint
+    :param max_solutions: number of solutions to find (1 => single solution)
+    """
     instance = parse_file(filename)
-    '''
-    :param filename:
-    The constraint path
-    :param kwargs:
-    As you wish, you may supply extra arguments using the kwargs
-    :return:
-    A dict.
-    '''
-    # Printing (accessing or output) values from test instances
     print("=====================================================")
-    print(f'\tFile: {filename}')
-    print(f'\tNumber of Steps: {instance.number_of_steps}')
-    print(f'\tNumber of Users: {instance.number_of_users}')
-    print(f'\tNumber of Constraints: {instance.number_of_constraints}')
-    print(f'\tAuthorisations: {instance.auth}')
-    print(f'\tSeparation-of-duty: {instance.SOD}')
-    print(f'\tBinding-of-duty: {instance.BOD}')
-    print(f'\tAt-most-k: {instance.at_most_k}')
-    print(f'\tOne-team: {instance.one_team}')
-    print(f'\tUser-capacity: {instance.user_capacity}')
+    print(f"File: {filename}")
+    print(f"Steps: {instance.number_of_steps}, Users: {instance.number_of_users}, Constraints: {instance.number_of_constraints}")
+    print(f"Auth: {instance.auth}")
+    print(f"SOD: {instance.SOD}")
+    print(f"BOD: {instance.BOD}")
+    print(f"At-most-k: {instance.at_most_k}")
+    print(f"One-team: {instance.one_team}")
+    print(f"User-capacity: {instance.user_capacity}")
     print("=====================================================")
 
-    ''' Start of Solver '''
+    start_time = currenttime() * 1000.0
+
+    # We'll do a CP approach for enumerating solutions (like we did in the older partial code).
+    from ortools.sat.python import cp_model
     model = cp_model.CpModel()
-    user_assignment = [[model.NewBoolVar(f's{s + 1}: u{u + 1}') for u in range(instance.number_of_users)]
+
+    # user_assignment[s][u] = bool => step s is assigned to user u
+    user_assignment = [[model.NewBoolVar(f's{s+1}_u{u+1}')
+                        for u in range(instance.number_of_users)]
                        for s in range(instance.number_of_steps)]
-    # Each step is assigned to exactly one user
-    for step in range(instance.number_of_steps):
-        model.AddExactlyOne(user_assignment[step][user] for user in range(instance.number_of_users))
+    # each step exactly 1 user
+    for s in range(instance.number_of_steps):
+        model.AddExactlyOne(user_assignment[s][u] for u in range(instance.number_of_users))
 
-    # Authorisations constraint
-    for user in range(instance.number_of_users):
-        if instance.auth[user]:
-            for step in range(instance.number_of_steps):
-                if step not in instance.auth[user]:
-                    model.Add(user_assignment[step][user] == 0)
+    # Auth
+    for u, stp_list in enumerate(instance.auth):
+        if len(stp_list) == 1 and stp_list[0] == -1:
+            # means no steps allowed
+            # => user cannot be assigned to any step
+            for s in range(instance.number_of_steps):
+                model.Add(user_assignment[s][u] == 0)
+        elif len(stp_list) > 0:
+            # those steps are allowed, the rest are not
+            allowed_set = set(stp_list)
+            for s in range(instance.number_of_steps):
+                if s not in allowed_set:
+                    model.Add(user_assignment[s][u] == 0)
 
-    # Separation-of-duty constraint
-    for (separated_step1, separated_step2) in instance.SOD:
-        for user in range(instance.number_of_users):
-            model.Add(user_assignment[separated_step2][user] == 0).OnlyEnforceIf(user_assignment[separated_step1][user])
+    # SOD
+    for (s1, s2) in instance.SOD:
+        for u in range(instance.number_of_users):
+            model.Add(user_assignment[s2][u] == 0).OnlyEnforceIf(user_assignment[s1][u])
 
-    # Binding-of-duty constraint
-    for (bound_step1, bound_step2) in instance.BOD:
-        for user in range(instance.number_of_users):
-            model.Add(user_assignment[bound_step2][user] == 1).OnlyEnforceIf(user_assignment[bound_step1][user])
+    # BOD
+    for (s1, s2) in instance.BOD:
+        for u in range(instance.number_of_users):
+            model.Add(user_assignment[s2][u] == 1).OnlyEnforceIf(user_assignment[s1][u])
 
-    # At-most-k constraint
-    for (k, steps) in instance.at_most_k:
-        user_assignment_flag = [model.NewBoolVar(f'at-most-k_u{u}') for u in range(instance.number_of_users)]
-        for user in range(instance.number_of_users):
-            for step in steps:
-                model.Add(user_assignment_flag[user] == 1).OnlyEnforceIf(user_assignment[step][user])
-            model.Add(sum(user_assignment[step][user] for step in steps) >= user_assignment_flag[user])
-        model.Add(sum(user_assignment_flag) <= k)
+    # At-most-k
+    for (k, stp) in instance.at_most_k:
+        user_flag = [model.NewBoolVar(f'atmostk_u{u}') for u in range(instance.number_of_users)]
+        for u in range(instance.number_of_users):
+            # if user is assigned in any of stp => user_flag[u] = 1
+            for ss in stp:
+                model.Add(user_flag[u] == 1).OnlyEnforceIf(user_assignment[ss][u])
+            # user assigned to stp >= user_flag[u]
+            model.Add(sum(user_assignment[ss][u] for ss in stp) >= user_flag[u])
+        model.Add(sum(user_flag) <= k)
 
-    # One-team constraint
-    for (steps, teams) in instance.one_team:
-        team_flag = [model.NewBoolVar(f'team{t}') for t in range(len(teams))]
-        model.AddExactlyOne(team_flag)  # Only one team can be chosen
-        for team_index in range(len(teams)):
-            for step in steps:
-                for user in teams[team_index]:
-                    model.Add(user_assignment[step][user] == 0).OnlyEnforceIf(team_flag[team_index].Not())
-        # Steps cannot be assigned to users not listed in teams
-        users_in_teams = list(numpy.concatenate(teams).flat)
-        for step in steps:
-            for user in range(instance.number_of_users):
-                if user not in users_in_teams:
-                    model.Add(user_assignment[step][user] == 0)
+    # One-team
+    for (steps_, teams) in instance.one_team:
+        team_flags = [model.NewBoolVar(f'team_{i}') for i in range(len(teams))]
+        model.AddExactlyOne(team_flags)
+        # if team i is selected => users outside that team for the steps => 0
+        for i, tlist in enumerate(teams):
+            # if not in tlist => can't assign
+            for s_ in steps_:
+                for u_ in range(instance.number_of_users):
+                    if u_ not in tlist:
+                        model.Add(user_assignment[s_][u_] == 0).OnlyEnforceIf(team_flags[i])
 
-    # User-Capacity constraints
-    for (user, capacity) in instance.user_capacity:
-        assigned_steps = [user_assignment[step][user] for step in range(instance.number_of_steps)]
-        model.Add(sum(assigned_steps) <= capacity)
-        print(f"Applied User-Capacity constraint: user u{user + 1} can perform at most {capacity} steps")
+    # user-capacity
+    for (u, cap) in instance.user_capacity:
+        model.Add(sum(user_assignment[s][u] for s in range(instance.number_of_steps)) <= cap)
 
-    ''' End of Solver '''
-    starttime = float(currenttime() * 1000)
     solver = cp_model.CpSolver()
-    status = solver.Solve(model)
-    endtime = float(currenttime() * 1000)
 
-    d = dict(
-        sat='unsat',
-        sol=[],
-        mul_sol='',
-        exe_time=f'{endtime - starttime:.2f}ms'
-    )
+    if max_solutions <= 1:
+        # single solution
+        status = solver.Solve(model)
+        end_time = currenttime() * 1000.0
+        d = dict(sat='unsat', sol=[], mul_sol='', exe_time=f'{(end_time - start_time):.2f}ms')
+        if status == cp_model.FEASIBLE or status == cp_model.OPTIMAL:
+            d['sat'] = 'sat'
+            # build sol
+            for s in range(instance.number_of_steps):
+                for u in range(instance.number_of_users):
+                    if solver.Value(user_assignment[s][u]):
+                        d['sol'].append(f's{s+1}: u{u+1}')
+            if status == cp_model.FEASIBLE:
+                d['mul_sol'] = "Multiple solutions may exist"
+            else:
+                d['mul_sol'] = "Unique solution found"
+        return d
+    else:
+        # multiple solutions
+        solutions_found = []
 
-    if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-        d['sat'] = 'sat'
-        for s in range(instance.number_of_steps):
-            for u in range(instance.number_of_users):
-                if solver.Value(user_assignment[s][u]):
-                    d['sol'].append(f's{s + 1}: u{u + 1}')
-        d['mul_sol'] = "Multiple solutions may exist" if status == cp_model.FEASIBLE else "Unique solution found"
-    return d
+        class MultiSolutionCallback(cp_model.CpSolverSolutionCallback):
+            def __init__(self, assign_bools, step_count, user_count, limit):
+                cp_model.CpSolverSolutionCallback.__init__(self)
+                self._assign = assign_bools
+                self._steps = step_count
+                self._users = user_count
+                self._limit = limit
+                self._count = 0
 
+            def on_solution_callback(self):
+                if self._count >= self._limit:
+                    self.StopSearch()
+                    return
+                self._count += 1
+                one_sol = []
+                for s_ in range(self._steps):
+                    for u_ in range(self._users):
+                        if self.Value(self._assign[s_][u_]):
+                            one_sol.append(f's{s_+1}: u{u_+1}')
+                solutions_found.append(one_sol)
 
-if __name__ == '__main__':
+        cb = MultiSolutionCallback(user_assignment, instance.number_of_steps, instance.number_of_users, max_solutions)
+        status = solver.SearchForAllSolutions(model, cb)
+        end_time = currenttime() * 1000.0
+        d = dict(sat='unsat', sol=[], mul_sol='', exe_time=f'{(end_time - start_time):.2f}ms')
+        if len(solutions_found) > 0:
+            d['sat'] = 'sat'
+            # first solution in 'sol'
+            d['sol'] = solutions_found[0]
+            # store all solutions in mul_sol
+            blocks = []
+            for idx, sol in enumerate(solutions_found, start=1):
+                blocks.append(f"Solution {idx}:\n" + "\n".join(sol))
+            d['mul_sol'] = "\n\n".join(blocks)
+        return d
+
+if __name__=='__main__':
     base_path = os.path.dirname(__file__)
-    dpath = os.path.join(base_path, 'instances', 'example7.txt')  # Path to test file
-    d = Solver(dpath)
-    s = transform_output(d)
-    print(s)
+    dpath = os.path.join(base_path, 'all/instances', 'example9.txt')
+    ret = Solver(dpath, max_solutions=1)
+    print("sat:", ret['sat'])
+    print("First solution =>", ret['sol'])
+    print("All solutions =>\n", ret['mul_sol'])

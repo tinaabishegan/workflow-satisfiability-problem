@@ -8,6 +8,7 @@ from tkinter import StringVar, IntVar, BooleanVar
 from tkinter.ttk import Treeview, Progressbar
 import time
 import subprocess
+import pandas as pd  # not used here, presumably, unless you want to do something with Excel
 
 def parse_file(filename):
     with open(filename, 'r') as file:
@@ -29,10 +30,9 @@ def parse_file(filename):
             user_capacity_constraints[user_id] = capacity
         else:
             constraints.append(line)
-
     return steps_count, users_count, constraints, user_capacity_constraints
 
-# GUI Application Class
+
 class WorkflowSolverApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -49,14 +49,13 @@ class WorkflowSolverApp(tk.Tk):
         self.binding_of_duty_constraints = []
         self.separation_of_duty_constraints = []
         self.conflicts = []
-        self.timeout = 240  # 4 minutes timeout
+        self.timeout = 240  # 4 minutes
 
     def create_widgets(self):
-        # Create notebook (tabs)
+        # Notebook
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(expand=True, fill='both')
 
-        # Create frames for each tab
         self.input_frame = ttk.Frame(self.notebook)
         self.constraints_frame = ttk.Frame(self.notebook)
         self.results_frame = ttk.Frame(self.notebook)
@@ -65,16 +64,10 @@ class WorkflowSolverApp(tk.Tk):
         self.notebook.add(self.constraints_frame, text='Constraints')
         self.notebook.add(self.results_frame, text='Results')
 
-        # Build Input Tab
         self.build_input_tab()
-
-        # Build Constraints Tab
         self.build_constraints_tab()
-
-        # Build Results Tab
         self.build_results_tab()
 
-    # ------------- Input Tab Enhancements -------------
     def build_input_tab(self):
         frame = self.input_frame
 
@@ -572,111 +565,158 @@ class WorkflowSolverApp(tk.Tk):
         solve_button = ttk.Button(frame, text="Solve Problem", command=self.solve_problem)
         solve_button.pack(pady=10)
 
-        # --- Added Validate Solution Checkbox ---
+        # Validate Solution Checkbox
         self.validate_var = BooleanVar()
         validate_checkbox = ttk.Checkbutton(frame, text="Validate solution", variable=self.validate_var)
         validate_checkbox.pack(pady=5)
 
-        # Progress bar
+        # Max Solutions Spinbox
+        self.max_solutions_var = IntVar(value=1)
+        spin_label = ttk.Label(frame, text="Max Solutions:")
+        spin_label.pack(side='left', padx=5)
+        self.max_solutions_spin = ttk.Spinbox(frame, from_=1, to=999, textvariable=self.max_solutions_var, width=5)
+        self.max_solutions_spin.pack(side='left', padx=5)
+
+        # Progress Bar
         self.progress_var = IntVar()
         self.progress_bar = Progressbar(frame, variable=self.progress_var, maximum=100)
         self.progress_bar.pack(fill='x', padx=5, pady=5)
 
-        # Time and count information
+        # Info Label
         self.info_label = tk.Label(frame, text="")
         self.info_label.pack(pady=5)
 
-        # Result Treeview
+        # Solution Dropdown
+        self.solution_var = StringVar()
+        self.solution_dropdown = ttk.Combobox(frame, textvariable=self.solution_var, state="readonly")
+        self.solution_dropdown.pack(pady=5)
+        self.solution_dropdown.bind("<<ComboboxSelected>>", self.on_solution_selected)
+
+        # Results Treeview
         self.result_tree = Treeview(frame, columns=("Step", "Assigned User"), show='headings')
         self.result_tree.heading("Step", text="Step")
         self.result_tree.heading("Assigned User", text="Assigned User")
         self.result_tree.pack(fill='both', expand=True, padx=5, pady=5)
 
-        # --- Create notebook for validation results ---
+        # Validation Results Notebook
         self.validation_notebook = ttk.Notebook(frame)
         self.validation_notebook.pack(fill='both', expand=True, padx=5, pady=5)
 
-    # ------------- Solver Execution in a Separate Thread -------------
+    def on_solution_selected(self, event=None):
+        """Update the displayed solution when the dropdown selection changes."""
+        if self.solution_var.get():
+            index = int(self.solution_var.get().split(" ")[-1]) - 1
+            self.show_solution(self.solutions[index])
+
     def solve_problem(self):
         # Run solver in a separate thread
         self.progress_var.set(0)
         self.update_idletasks()
         thread = Thread(target=self.run_solver)
         thread.start()
-    
+
     def run_solver(self):
-        selected_solver = self.solver_var.get()
+        solver_name = self.solver_var.get()
+        max_solutions = self.max_solutions_var.get()  # <-- CHANGED: read from spinbox
+
         try:
-            solver_module = __import__(selected_solver)
+            solver_module = __import__(solver_name)
         except ImportError as e:
-            messagebox.showerror("Error", f"Failed to load solver {selected_solver}: {e}")
+            messagebox.showerror("Error", f"Failed to load solver {solver_name}: {e}")
             return
 
+        # build temp file
         temp_filename = 'temp_instance.txt'
-        with open(temp_filename, 'w') as file:
-            file.write(f"#Steps: {len(self.steps)}\n")
-            file.write(f"#Users: {len(self.users)}\n")
-            file.write(f"#Constraints: {len(self.constraints)}\n")
-            for constraint in self.constraints:
-                file.write(constraint + '\n')
+        with open(temp_filename, 'w') as f:
+            f.write(f"#Steps: {len(self.steps)}\n")
+            f.write(f"#Users: {len(self.users)}\n")
+            f.write(f"#Constraints: {len(self.constraints)}\n")
+            for c in self.constraints:
+                f.write(c + '\n')
 
         def solver_callback():
-            start_time = time.time()
-            d = solver_module.Solver(temp_filename)
-            end_time = time.time()
-            d['exe_time'] = end_time - start_time
-            # Update results
-            self.after(0, lambda: self.display_results(d, temp_filename))
-            # os.remove(temp_filename)  # Remove after validation
+            start_t = time.time()
+            result_dict = solver_module.Solver(temp_filename, max_solutions=max_solutions)
+            end_t = time.time()
+            result_dict['exe_time'] = end_t - start_t
+            self.after(0, lambda: self.display_results(result_dict, temp_filename))
 
         solver_thread = Thread(target=solver_callback)
         solver_thread.start()
 
     def display_results(self, d, temp_filename):
+        """
+        Display the results of the solver.
+        Handles both single and multiple solutions.
+        """
         self.result_tree.delete(*self.result_tree.get_children())
+        
         if d['sat'] == 'sat':
-            self.solutions = [d['sol']]
-            self.show_solution(d['sol'])
-            self.info_label['text'] = f"1 solution found. Solve time: {d['exe_time']:.2f} seconds."
-
-            if self.validate_var.get():
-                self.run_validators(temp_filename, 'temp_solution.txt')
+            # Process multiple solutions
+            if 'mul_sol' in d and d['mul_sol']:
+                solutions = d['mul_sol'].split("\n\n")
+                self.solutions = [sol.strip().splitlines() for sol in solutions if sol.strip()]
+                num_solutions = len(self.solutions)
             else:
-                os.remove(temp_filename)
-                os.remove('temp_solution.txt')
+                self.solutions = [d['sol']]
+                num_solutions = 1
 
+            # Populate the solution dropdown
+            solution_labels = [f"Solution {i + 1}" for i in range(num_solutions)]
+            self.solution_dropdown['values'] = solution_labels
+            self.solution_var.set(solution_labels[0])
+
+            # Show the first solution
+            self.show_solution(self.solutions[0])
+
+            # Update the info label
+            self.info_label['text'] = f"{num_solutions} solution(s) found. Solve time: {d['exe_time']:.2f} seconds."
+
+            # Run validators for each solution if enabled
+            if self.validate_var.get():
+                for i, solution in enumerate(self.solutions, 1):
+                    temp_solution_file = f"temp_solution_{i}.txt"
+                    with open(temp_solution_file, 'w') as f:
+                        for line in solution:
+                            if ": " in line:
+                                f.write(line + '\n')
+                    self.run_validators(temp_filename, temp_solution_file)
+                    os.remove(temp_solution_file)
+
+            os.remove(temp_filename)
         else:
             self.info_label['text'] = "No solutions found."
             messagebox.showerror("No Solution", "No solution found.")
             os.remove(temp_filename)
 
+
+
     def show_solution(self, solution):
+        """
+        Display a single solution in the result treeview.
+        Save the displayed solution to a temporary file.
+        """
         self.result_tree.delete(*self.result_tree.get_children())
         with open('temp_solution.txt', 'w') as f:
             for line in solution:
-                step, user = line.split(': ')
-                self.result_tree.insert('', tk.END, values=(step, user))
-                f.write(f"{step}: {user}\n")
+                if ": " in line:
+                    step, user = line.split(': ')
+                    self.result_tree.insert('', tk.END, values=(step.strip(), user.strip()))
+                    f.write(f"{step.strip()}: {user.strip()}\n")
+
 
     def run_validators(self, problem_file, solution_file):
+        """
+        Run multiple validators on a solution file and display results in tabs.
+        """
         # Clear previous validation tabs
         for tab_id in self.validation_notebook.tabs():
             self.validation_notebook.forget(tab_id)
 
-        # Run validator.py
-        validation_result = self.run_validator_script('validator.py', problem_file, solution_file)
-        self.add_validation_tab('Validator 1', validation_result)
-
-        # Run validator2.py
-        validation_result = self.run_validator_script('validator2.py', problem_file, solution_file)
-        self.add_validation_tab('Validator 2', validation_result)
-
-        # Run validator3.py
-        validation_result = self.run_validator_script('validator3.py', problem_file, solution_file)
-        self.add_validation_tab('Validator 3', validation_result)
-
-        os.remove(problem_file)
-        os.remove(solution_file)
+        # Run each validator and add results
+        for validator_script in ['validator.py', 'validator2.py', 'validator3.py']:
+            validation_result = self.run_validator_script(validator_script, problem_file, solution_file)
+            self.add_validation_tab(f"{validator_script} ({os.path.basename(solution_file)})", validation_result)
 
     def run_validator_script(self, script_name, problem_file, solution_file):
         try:
@@ -685,13 +725,16 @@ class WorkflowSolverApp(tk.Tk):
             output = result.stdout
             errors = result.stderr
             if result.returncode == 0:
-                return output + errors
+                return f"{script_name} executed successfully.\n{output}\n{errors}"
             else:
-                return f"Validator encountered errors:\n{errors}"
+                return f"{script_name} encountered errors:\n{errors}"
         except Exception as e:
             return f"Failed to run {script_name}: {e}"
 
     def add_validation_tab(self, validator_name, validation_result):
+        """
+        Add a new tab to display the validation results.
+        """
         tab = ttk.Frame(self.validation_notebook)
         self.validation_notebook.add(tab, text=validator_name)
         text_widget = tk.Text(tab)
